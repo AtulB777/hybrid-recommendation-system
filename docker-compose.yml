@@ -1,0 +1,59 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recsys
+      POSTGRES_PASSWORD: recsys
+      POSTGRES_DB: recsys
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recsys -d recsys"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # OFFLINE: ingest -> tune -> evaluate -> fit -> write artifact + precomputed recommendations.
+  # Runs to completion, then exits. Re-run on a schedule: `docker compose run --rm trainer`
+  trainer:
+    build: .
+    command: ["python", "-m", "training.train"]
+    environment: &env
+      RECSYS_DATABASE_URL: postgresql+psycopg2://recsys:recsys@db:5432/recsys
+      RECSYS_ARTIFACT_PATH: /app/artifacts/model_bundle.joblib
+      RECSYS_CACHE_BACKEND: memory   # switch to `redis` once the redis service below is enabled
+      # RECSYS_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - artifacts:/app/artifacts
+      - rawdata:/app/data/raw
+      - docs:/app/docs
+    depends_on:
+      db: { condition: service_healthy }
+
+  # ONLINE: stateless serving. Reads the artifact + precomputed rows; never trains.
+  api:
+    build: .
+    environment: *env
+    ports: ["8000:8000"]
+    volumes:
+      - artifacts:/app/artifacts:ro
+    depends_on:
+      db: { condition: service_healthy }
+      trainer: { condition: service_completed_successfully }
+
+  # Optional UI:  docker compose --profile ui up
+  # streamlit:
+  #   build: .
+  #   profiles: ["ui"]
+  #   command: ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+  # Optional cache: uncomment, `pip install redis`, set RECSYS_CACHE_BACKEND=redis above.
+  # redis:
+  #   image: redis:7-alpine
+  #   ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+  artifacts:
+  rawdata:
+  docs:
